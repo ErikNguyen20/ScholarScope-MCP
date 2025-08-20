@@ -1,7 +1,11 @@
-# **ScholarScope MCP**
+<div align="center">
+
+# 🎓 **ScholarScope MCP** 🎓
+
 _Academic MCP Server_
 
----
+</div>
+
 
 ## **About**
 
@@ -23,8 +27,8 @@ It integrates with the [OpenAlex API](https://openalex.org/) to search for **pap
 
 1. **Clone the repository**  
    ```bash
-   git clone https://github.com/your-username/your-repo-name.git
-   cd your-repo-name/mcp_server
+   git clone https://github.com/ErikNguyen20/ScholarScope-MCP.git
+   cd ScholarScope-MCP
    ```
 
 2. **Install [uv](https://docs.astral.sh/uv/)** (if you don’t already have it)  
@@ -73,7 +77,6 @@ npx @modelcontextprotocol/inspector uv run \
       "args": [
         "run",
         "--directory", "/path/to/mcp_server",
-        "--with", "fastmcp",
         "fastmcp",
         "run",
         "src/server.py"
@@ -83,6 +86,7 @@ npx @modelcontextprotocol/inspector uv run \
 }
 ```
 
+> [!Note]
 > Ensure the `/path/to/mcp_server` matches your local directory structure.  
 > Restart Claude Desktop after updating the config.
 
