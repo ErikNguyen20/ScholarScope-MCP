@@ -59,7 +59,7 @@ npx @modelcontextprotocol/inspector uv run \
   --with fastmcp \
   fastmcp run src/server.py
 ```
-
+> [!Note]
 > Replace `/path/to/mcp_server` with the path to your local project root.
 
 ---
