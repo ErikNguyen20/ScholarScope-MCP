@@ -1,6 +1,5 @@
-<p align="center">
-  <img src="https://github.com/user-attachments/assets/your-banner-id-here" alt="ScholarScope MCP Server Banner" width="100%" />
-</p>
+# **ScholarScope MCP**
+_Academic MCP Server_
 
 ---
 
