@@ -1,0 +1,23 @@
+# Python junk
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual envs
+venv
+.venv
+
+# Ignore environment files
+.env
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
