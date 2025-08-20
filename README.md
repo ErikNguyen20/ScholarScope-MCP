@@ -1,6 +1,6 @@
 <div align="center">
 
-# 🎓 **ScholarScope MCP** 🎓
+# **ScholarScope MCP**
 
 _Academic MCP Server_
 
