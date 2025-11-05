@@ -21,6 +21,10 @@ It integrates with the [OpenAlex API](https://openalex.org/) to search for **pap
 [![FastMCP](https://img.shields.io/badge/Backend-FastMCP-orange?style=for-the-badge&logo=modelcontextprotocol)](https://github.com/modelcontextprotocol/fastmcp)  
 ![License](https://img.shields.io/badge/license-MIT-green?style=for-the-badge)  
 
+<a href="https://glama.ai/mcp/servers/@ErikNguyen20/ScholarScope-MCP">
+  <img width="380" height="200" src="https://glama.ai/mcp/servers/@ErikNguyen20/ScholarScope-MCP/badge" alt="ScholarScope MCP server" />
+</a>
+
 ---
 
 ## 🚀 **Installation**
@@ -31,7 +35,7 @@ It integrates with the [OpenAlex API](https://openalex.org/) to search for **pap
    cd ScholarScope-MCP
    ```
 
-2. **Install [uv](https://docs.astral.sh/uv/)** (if you don’t already have it)  
+2. **Install [uv](https://docs.astral.sh/uv/)** (if you don't already have it)  
    ```bash
    pip install uv
    ```
