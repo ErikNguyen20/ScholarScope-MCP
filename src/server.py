@@ -12,14 +12,45 @@ from dotenv import load_dotenv, find_dotenv
 
 
 # Initialize env variables
-if not os.getenv("OPENALEX_MAILTO"):
+# OpenAlex recommends providing a valid contact email via the `mailto` parameter.
+# ScholarScope expects this via OPENALEX_MAILTO (or falls back to OPENALEX_EMAIL).
+if not (os.getenv("OPENALEX_MAILTO") or os.getenv("OPENALEX_EMAIL")):
     load_dotenv(find_dotenv(usecwd=True))
-OPENALEX_MAILTO = os.getenv("OPENALEX_MAILTO", "placeholder_email@gmail.com")
+
+OPENALEX_MAILTO = os.getenv("OPENALEX_MAILTO") or os.getenv("OPENALEX_EMAIL")
 
 
 # Initialize Logger
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
+
+
+def _escape_openalex_filter_value(value: str) -> str:
+    # OpenAlex filter strings use double quotes for phrases; escape any existing quotes.
+    return value.replace('"', '\\"')
+
+
+def _openalex_search_filter(field: str, query: str) -> str:
+    """Build a more forgiving OpenAlex `<field>.search:` filter.
+
+    If the query contains whitespace, avoid wrapping it in quotes; quoting forces an exact
+    phrase match and often returns 0 results for multi-word queries.
+    """
+    q = _escape_openalex_filter_value(query.strip())
+    if not q:
+        return f"{field}.search:"
+    if any(ch.isspace() for ch in q):
+        return f"{field}.search:{q}"
+    return f'{field}.search:"{q}"'
+
+
+def _require_openalex_mailto() -> str:
+    if not OPENALEX_MAILTO:
+        raise ToolError(
+            "OpenAlex requires a contact email. Set OPENALEX_MAILTO (or OPENALEX_EMAIL) "
+            "in your environment or .env file."
+        )
+    return OPENALEX_MAILTO
 
 
 # Define the FastMCP server
@@ -29,18 +60,20 @@ mcp = FastMCP(
         When retrieving paper content, always use the 'preferred_fulltext_url' field
         and access it via the fetch_fulltext tool for full text retrieval.
         Only use other links if 'preferred_fulltext_url' is missing, invalid, or fallback is required.
-    """
+    """,
 )
 
 
 @mcp.tool
 async def search_papers(
-        query: str,
-        search_by: Literal["default", "title", "title_and_abstract"] = "default",
-        sort_by: Literal["relevance_score", "cited_by_count", "publication_date"] = "relevance_score",
-        institution_name: Optional[str] = None,
-        author_id: Optional[str] = None,
-        page: int = 1,
+    query: str,
+    search_by: Literal["default", "title", "title_and_abstract"] = "default",
+    sort_by: Literal[
+        "relevance_score", "cited_by_count", "publication_date"
+    ] = "relevance_score",
+    institution_name: Optional[str] = None,
+    author_id: Optional[str] = None,
+    page: int = 1,
 ) -> PageResult:
     """
     Searches for academic papers using the OpenAlex API.
@@ -59,28 +92,61 @@ async def search_papers(
     query = sanitize_search_text(query)
     institution_name = sanitize_search_text(institution_name)
 
+    if not query:
+        raise ToolError("Query must be a non-empty string.")
+
+    if not OPENALEX_MAILTO:
+        raise ToolError(
+            "OpenAlex requires a contact email. Set OPENALEX_MAILTO (or OPENALEX_EMAIL) "
+            "in your environment or .env file."
+        )
+
+    # OpenAlex filter fields.
+    # Note: OpenAlex supports `default.search` and `title.search`. There is no
+    # `title_and_abstract.search` field, so we map that option to `default.search`.
+    search_field = {
+        "default": "default",
+        "title": "title",
+        "title_and_abstract": "default",
+    }.get(search_by, "default")
+
+    per_page = 10
     params = {
-        "filter": f"{search_by}.search:\"{query}\"",
+        "filter": _openalex_search_filter(search_field, query),
         "sort": f"{sort_by}:desc",
         "page": page,
-        "per_page": 10,
+        "per-page": per_page,
     }
     if institution_name:
-        params["filter"] += f",raw_affiliation_strings.search:\"{institution_name}\""
+        params["filter"] += "," + _openalex_search_filter(
+            "raw_affiliation_strings", institution_name
+        )
     if author_id:
         params["filter"] += f",authorships.author.id:{author_id}"
 
     # Fetches search results from the OpenAlex API
-    async with RequestAPI("https://api.openalex.org", default_params={"mailto": OPENALEX_MAILTO}) as api:
-        logger.info(f"Searching for papers using: query={query}, search_by={search_by}, sort_by={sort_by}, page={page}")
+    async with RequestAPI(
+        "https://api.openalex.org",
+        default_params={"mailto": _require_openalex_mailto()},
+    ) as api:
+        logger.info(
+            f"Searching for papers using: query={query}, search_by={search_by}, sort_by={sort_by}, page={page}"
+        )
         try:
             result = await api.aget("/works", params=params)
 
-            # Returns a message for when the search results are empty
+            # Return an empty page instead of raising; empty results are not exceptional.
             if result is None or len(result.get("results", []) or []) == 0:
-                error_message = "No works found with the query."
-                logger.info(error_message)
-                raise ToolError(error_message)
+                total_count = (
+                    (result or {}).get("meta", {}).get("count") if result else 0
+                )
+                return PageResult(
+                    data=[],
+                    total_count=total_count,
+                    per_page=per_page,
+                    page=page,
+                    has_next=None,
+                )
 
             # Successfully returns the searched papers
             works = Work.from_list(result.get("results", []) or [])
@@ -88,16 +154,16 @@ async def search_papers(
             logger.info(success_message)
 
             total_count = (result.get("meta", {}) or {}).get("count")
-            if total_count and total_count > params["per_page"] * params["page"]:
+            if total_count and total_count > per_page * page:
                 has_next = True
             else:
                 has_next = None
             return PageResult(
                 data=Work.list_to_json(works),
                 total_count=total_count,
-                per_page=params["per_page"],
-                page=params["page"],
-                has_next=has_next
+                per_page=per_page,
+                page=page,
+                has_next=has_next,
             )
         except httpx.HTTPStatusError as e:
             error_message = f"Request failed with status: {e.response.status_code}"
@@ -111,10 +177,10 @@ async def search_papers(
 
 @mcp.tool
 async def search_authors(
-        query: str,
-        sort_by: Literal["relevance_score", "cited_by_count"] = "relevance_score",
-        institution_id: Optional[str] = None,
-        page: int = 1,
+    query: str,
+    sort_by: Literal["relevance_score", "cited_by_count"] = "relevance_score",
+    institution_id: Optional[str] = None,
+    page: int = 1,
 ) -> PageResult:
     """
     Searches for authors using the OpenAlex API.
@@ -130,26 +196,40 @@ async def search_authors(
     """
     query = sanitize_search_text(query)
 
+    per_page = 10
     params = {
-        "filter": f"default.search:\"{query}\"",
+        "filter": _openalex_search_filter("default", query),
         "sort": f"{sort_by}:desc",
         "page": page,
-        "per_page": 10,
+        "per-page": per_page,
     }
     if institution_id:
-        params["filter"] += f",affiliations.institution.id:\"{institution_id}\""
+        params["filter"] += (
+            f',affiliations.institution.id:"{_escape_openalex_filter_value(institution_id)}"'
+        )
 
     # Fetches search results from the OpenAlex API
-    async with RequestAPI("https://api.openalex.org", default_params={"mailto": OPENALEX_MAILTO}) as api:
-        logger.info(f"Searching for authors using: query={query}, sort_by={sort_by}, page={page}, institution_id={institution_id}")
+    async with RequestAPI(
+        "https://api.openalex.org",
+        default_params={"mailto": _require_openalex_mailto()},
+    ) as api:
+        logger.info(
+            f"Searching for authors using: query={query}, sort_by={sort_by}, page={page}, institution_id={institution_id}"
+        )
         try:
             result = await api.aget("/authors", params=params)
 
-            # Returns a message for when the search results are empty
             if result is None or len(result.get("results", []) or []) == 0:
-                error_message = "No authors found with the query."
-                logger.info(error_message)
-                raise ToolError(error_message)
+                total_count = (
+                    (result or {}).get("meta", {}).get("count") if result else 0
+                )
+                return PageResult(
+                    data=[],
+                    total_count=total_count,
+                    per_page=per_page,
+                    page=page,
+                    has_next=None,
+                )
 
             # Successfully returns the searched authors
             authors = Author.from_list(result.get("results", []) or [])
@@ -157,16 +237,16 @@ async def search_authors(
             logger.info(success_message)
 
             total_count = (result.get("meta", {}) or {}).get("count")
-            if total_count and total_count > params["per_page"] * params["page"]:
+            if total_count and total_count > per_page * page:
                 has_next = True
             else:
                 has_next = None
             return PageResult(
                 data=Author.list_to_json(authors),
                 total_count=total_count,
-                per_page=params["per_page"],
-                page=params["page"],
-                has_next=has_next
+                per_page=per_page,
+                page=page,
+                has_next=has_next,
             )
         except httpx.HTTPStatusError as e:
             error_message = f"Request failed with status: {e.response.status_code}"
@@ -180,9 +260,9 @@ async def search_authors(
 
 @mcp.tool
 async def search_institutions(
-        query: str,
-        sort_by: Literal["relevance_score", "cited_by_count"] = "relevance_score",
-        page: int = 1,
+    query: str,
+    sort_by: Literal["relevance_score", "cited_by_count"] = "relevance_score",
+    page: int = 1,
 ) -> PageResult:
     """
     Searches for institutions using the OpenAlex API.
@@ -197,24 +277,36 @@ async def search_institutions(
     """
     query = sanitize_search_text(query)
 
+    per_page = 10
     params = {
-        "filter": f"default.search:\"{query}\"",
+        "filter": _openalex_search_filter("default", query),
         "sort": f"{sort_by}:desc",
         "page": page,
-        "per_page": 10,
+        "per-page": per_page,
     }
 
     # Fetches search results from the OpenAlex API
-    async with RequestAPI("https://api.openalex.org", default_params={"mailto": OPENALEX_MAILTO}) as api:
-        logger.info(f"Searching for authors using: query={query}, sort_by={sort_by}, page={page}")
+    async with RequestAPI(
+        "https://api.openalex.org",
+        default_params={"mailto": _require_openalex_mailto()},
+    ) as api:
+        logger.info(
+            f"Searching for institutions using: query={query}, sort_by={sort_by}, page={page}"
+        )
         try:
             result = await api.aget("/institutions", params=params)
 
-            # Returns a message for when the search results are empty
             if result is None or len(result.get("results", []) or []) == 0:
-                error_message = "No institutions found with the query."
-                logger.info(error_message)
-                raise ToolError(error_message)
+                total_count = (
+                    (result or {}).get("meta", {}).get("count") if result else 0
+                )
+                return PageResult(
+                    data=[],
+                    total_count=total_count,
+                    per_page=per_page,
+                    page=page,
+                    has_next=None,
+                )
 
             # Successfully returns the searched papers
             institutions = Institution.from_list(result.get("results", []) or [])
@@ -222,16 +314,16 @@ async def search_institutions(
             logger.info(success_message)
 
             total_count = (result.get("meta", {}) or {}).get("count")
-            if total_count and total_count > params["per_page"] * params["page"]:
+            if total_count and total_count > per_page * page:
                 has_next = True
             else:
                 has_next = None
             return PageResult(
                 data=Institution.list_to_json(institutions),
                 total_count=total_count,
-                per_page=params["per_page"],
-                page=params["page"],
-                has_next=has_next
+                per_page=per_page,
+                page=page,
+                has_next=has_next,
             )
         except httpx.HTTPStatusError as e:
             error_message = f"Request failed with status: {e.response.status_code}"
@@ -245,9 +337,9 @@ async def search_institutions(
 
 @mcp.tool
 async def papers_by_author(
-        author_id: str,
-        sort_by: Literal["cited_by_count", "publication_date"] = "cited_by_count",
-        page: int = 1,
+    author_id: str,
+    sort_by: Literal["cited_by_count", "publication_date"] = "cited_by_count",
+    page: int = 1,
 ) -> PageResult:
     """
     Searches for academic papers by a particular author using the OpenAlex API.
@@ -260,24 +352,36 @@ async def papers_by_author(
     Returns:
         A JSON object containing a list of papers+ids by the specified author, or an error message if the search fails.
     """
+    per_page = 10
     params = {
         "filter": f"authorships.author.id:{author_id}",
         "sort": f"{sort_by}:desc",
         "page": page,
-        "per_page": 10,
+        "per-page": per_page,
     }
 
     # Fetches search results from the OpenAlex API
-    async with RequestAPI("https://api.openalex.org", default_params={"mailto": OPENALEX_MAILTO}) as api:
-        logger.info(f"Searching for papers using: author_id={author_id}, sort_by={sort_by}, page={page}")
+    async with RequestAPI(
+        "https://api.openalex.org",
+        default_params={"mailto": _require_openalex_mailto()},
+    ) as api:
+        logger.info(
+            f"Searching for papers using: author_id={author_id}, sort_by={sort_by}, page={page}"
+        )
         try:
             result = await api.aget("/works", params=params)
 
-            # Returns a message for when the search results are empty
             if result is None or len(result.get("results", []) or []) == 0:
-                error_message = f"No works found for author_id={author_id}."
-                logger.info(error_message)
-                raise ToolError(error_message)
+                total_count = (
+                    (result or {}).get("meta", {}).get("count") if result else 0
+                )
+                return PageResult(
+                    data=[],
+                    total_count=total_count,
+                    per_page=per_page,
+                    page=page,
+                    has_next=None,
+                )
 
             # Successfully returns the searched papers
             works = Work.from_list(result.get("results", []) or [])
@@ -285,16 +389,16 @@ async def papers_by_author(
             logger.info(success_message)
 
             total_count = (result.get("meta", {}) or {}).get("count")
-            if total_count and total_count > params["per_page"] * params["page"]:
+            if total_count and total_count > per_page * page:
                 has_next = True
             else:
                 has_next = None
             return PageResult(
                 data=Work.list_to_json(works),
                 total_count=total_count,
-                per_page=params["per_page"],
-                page=params["page"],
-                has_next=has_next
+                per_page=per_page,
+                page=page,
+                has_next=has_next,
             )
         except httpx.HTTPStatusError as e:
             error_message = f"Request failed with status: {e.response.status_code}"
@@ -308,7 +412,7 @@ async def papers_by_author(
 
 @mcp.tool
 async def referenced_works_in_paper(
-        paper_id: str,
+    paper_id: str,
 ) -> ListResult:
     """
     Gets referenced works used in the specified paper using the OpenAlex API.
@@ -322,7 +426,10 @@ async def referenced_works_in_paper(
     """
 
     # Fetches search results from the OpenAlex API
-    async with RequestAPI("https://api.openalex.org", default_params={"mailto": OPENALEX_MAILTO}) as api:
+    async with RequestAPI(
+        "https://api.openalex.org",
+        default_params={"mailto": _require_openalex_mailto()},
+    ) as api:
         logger.info(f"Fetching referenced works for paper_id={paper_id}")
         try:
             result = await api.aget(f"/works/{paper_id}")
@@ -335,7 +442,9 @@ async def referenced_works_in_paper(
 
             # Successfully returns the searched papers
             works = result.get("referenced_works", []) or []
-            success_message = f"Retrieved {len(works)} referenced works for paper_id={paper_id}."
+            success_message = (
+                f"Retrieved {len(works)} referenced works for paper_id={paper_id}."
+            )
             logger.info(success_message)
             return ListResult(data=works, count=len(works))
         except httpx.HTTPStatusError as e:
@@ -350,7 +459,7 @@ async def referenced_works_in_paper(
 
 @mcp.tool
 async def related_works_of_paper(
-        paper_id: str,
+    paper_id: str,
 ) -> ListResult:
     """
     Gets related works used to the specified paper using the OpenAlex API.
@@ -364,7 +473,10 @@ async def related_works_of_paper(
     """
 
     # Fetches search results from the OpenAlex API
-    async with RequestAPI("https://api.openalex.org", default_params={"mailto": OPENALEX_MAILTO}) as api:
+    async with RequestAPI(
+        "https://api.openalex.org",
+        default_params={"mailto": _require_openalex_mailto()},
+    ) as api:
         logger.info(f"Fetching related_works works for paper_id={paper_id}")
         try:
             result = await api.aget(f"/works/{paper_id}")
@@ -377,7 +489,9 @@ async def related_works_of_paper(
 
             # Successfully returns the searched papers
             works = result.get("related_works", []) or []
-            success_message = f"Retrieved {len(works)} related_works works for paper_id={paper_id}."
+            success_message = (
+                f"Retrieved {len(works)} related_works works for paper_id={paper_id}."
+            )
             logger.info(success_message)
             return ListResult(data=works, count=len(works))
         except httpx.HTTPStatusError as e:
@@ -392,9 +506,9 @@ async def related_works_of_paper(
 
 @mcp.tool
 async def works_citing_paper(
-        paper_id: str,
-        sort_by: Literal["cited_by_count", "publication_date"] = "cited_by_count",
-        page: int = 1,
+    paper_id: str,
+    sort_by: Literal["cited_by_count", "publication_date"] = "cited_by_count",
+    page: int = 1,
 ) -> PageResult:
     """
     Retrieves works that cite a given paper from the OpenAlex API.
@@ -407,24 +521,36 @@ async def works_citing_paper(
     Returns:
         A JSON object containing a list of papers+ids citing the specific paper, or an error message if the retrieval fails.
     """
+    per_page = 10
     params = {
         "filter": f"cites:{paper_id}",
         "sort": f"{sort_by}:desc",
         "page": page,
-        "per_page": 10,
+        "per-page": per_page,
     }
 
     # Fetches search results from the OpenAlex API
-    async with RequestAPI("https://api.openalex.org", default_params={"mailto": OPENALEX_MAILTO}) as api:
-        logger.info(f"Searching for works citing paper using: paper_id={paper_id}, sort_by={sort_by}, page={page}")
+    async with RequestAPI(
+        "https://api.openalex.org",
+        default_params={"mailto": _require_openalex_mailto()},
+    ) as api:
+        logger.info(
+            f"Searching for works citing paper using: paper_id={paper_id}, sort_by={sort_by}, page={page}"
+        )
         try:
             result = await api.aget("/works", params=params)
 
-            # Returns a message for when the search results are empty
             if result is None or len(result.get("results", []) or []) == 0:
-                error_message = f"No cites found for paper_id={paper_id}."
-                logger.info(error_message)
-                raise ToolError(error_message)
+                total_count = (
+                    (result or {}).get("meta", {}).get("count") if result else 0
+                )
+                return PageResult(
+                    data=[],
+                    total_count=total_count,
+                    per_page=per_page,
+                    page=page,
+                    has_next=None,
+                )
 
             # Successfully returns the searched papers
             works = Work.from_list(result.get("results", []) or [])
@@ -432,16 +558,16 @@ async def works_citing_paper(
             logger.info(success_message)
 
             total_count = (result.get("meta", {}) or {}).get("count")
-            if total_count and total_count > params["per_page"] * params["page"]:
+            if total_count and total_count > per_page * page:
                 has_next = True
             else:
                 has_next = None
             return PageResult(
                 data=Work.list_to_json(works),
                 total_count=total_count,
-                per_page=params["per_page"],
-                page=params["page"],
-                has_next=has_next
+                per_page=per_page,
+                page=page,
+                has_next=has_next,
             )
         except httpx.HTTPStatusError as e:
             error_message = f"Request failed with status: {e.response.status_code}"
@@ -474,7 +600,7 @@ async def fetch_fulltext(preferred_fulltext_url: str, ctx: Context) -> str:
     # Strip Jina prefix if already present
     jina_prefix = "https://r.jina.ai/"
     if preferred_fulltext_url.startswith(jina_prefix):
-        preferred_fulltext_url = preferred_fulltext_url[len(jina_prefix):]
+        preferred_fulltext_url = preferred_fulltext_url[len(jina_prefix) :]
         logger.debug(f"Removed Jina prefix, normalized URL: {preferred_fulltext_url}")
 
     # Validates to prevent malicious/malformed urls
